@@ -64,3 +64,6 @@ def train():
     joblib.dump(le,     BASE / 'label_encoder.pkl')
     print("[MLP] Modelos guardados.")
     return mlp, scaler, le
+
+if __name__ == '__main__':
+    train()
