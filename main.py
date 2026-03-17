@@ -462,6 +462,153 @@ async def clasificar_acorde_bayes(audio: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=f"Error al clasificar: {str(e)}")
 
 
+# ── Entrenamiento personalizado ───────────────────────────────────────────
+ACORDES_VALIDOS = ['A', 'Am', 'C', 'D', 'F', 'Bm7']
+BASE_DIR        = Path(os.path.dirname(os.path.abspath(__file__)))
+CSV_USUARIO     = BASE_DIR / 'dataset_usuario.csv'
+CSV_ORIGINAL    = BASE_DIR / 'dataset_real.csv'
+
+
+@app.post("/samples")
+async def subir_sample(audio: UploadFile = File(...), acorde: str = ""):
+    """Recibe un audio etiquetado, extrae features y lo guarda en dataset_usuario.csv"""
+    acorde = acorde.strip()
+    if acorde not in ACORDES_VALIDOS:
+        raise HTTPException(status_code=400, detail=f"Acorde inválido. Válidos: {ACORDES_VALIDOS}")
+
+    allowed = ['audio/', 'application/octet-stream', 'video/']
+    ct = audio.content_type or ''
+    if ct and not any(ct.startswith(a) for a in allowed):
+        raise HTTPException(status_code=400, detail=f"Tipo no soportado: {ct}")
+
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as tmp:
+            tmp.write(await audio.read())
+            tmp_path = tmp.name
+
+        feats = _extract_features_for_bayes(tmp_path)
+        Path(tmp_path).unlink()
+
+        feats['acorde'] = acorde
+
+        import pandas as pd
+        fila = pd.DataFrame([feats])
+
+        if CSV_USUARIO.exists():
+            fila.to_csv(CSV_USUARIO, mode='a', header=False, index=False)
+        else:
+            fila.to_csv(CSV_USUARIO, index=False)
+
+        # Contar samples por acorde
+        df = pd.read_csv(CSV_USUARIO)
+        conteo = df['acorde'].value_counts().to_dict()
+        total  = len(df)
+
+        print(f"[Samples] +1 {acorde} | Total: {total} | {conteo}")
+        return {"success": True, "acorde": acorde, "total": total, "por_acorde": conteo}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error procesando sample: {str(e)}")
+
+
+@app.get("/samples/estado")
+async def estado_samples():
+    """Retorna cuántos samples hay por acorde en el dataset del usuario"""
+    import pandas as pd
+    if not CSV_USUARIO.exists():
+        return {"total": 0, "por_acorde": {a: 0 for a in ACORDES_VALIDOS}, "listo_para_entrenar": False}
+
+    df = pd.read_csv(CSV_USUARIO)
+    conteo = {a: int(df[df['acorde'] == a].shape[0]) for a in ACORDES_VALIDOS}
+    total  = len(df)
+    minimo = min(conteo.values())
+
+    return {
+        "total": total,
+        "por_acorde": conteo,
+        "minimo_por_acorde": minimo,
+        "listo_para_entrenar": minimo >= 10,
+    }
+
+
+@app.post("/reentrenar")
+async def reentrenar():
+    """Combina dataset original + usuario y reentrena el MLP"""
+    global _MLP_MODEL, _MLP_SCALER, _NB_ENCODER
+
+    import pandas as pd
+    from sklearn.neural_network import MLPClassifier
+    from sklearn.preprocessing import LabelEncoder, StandardScaler
+    from sklearn.model_selection import train_test_split
+    from sklearn.metrics import accuracy_score
+
+    if not CSV_USUARIO.exists():
+        raise HTTPException(status_code=400, detail="No hay samples del usuario todavía.")
+
+    df_usuario  = pd.read_csv(CSV_USUARIO)
+    minimo      = df_usuario['acorde'].value_counts().min()
+    if minimo < 5:
+        raise HTTPException(status_code=400, detail=f"Necesitas al menos 5 samples por acorde. Mínimo actual: {minimo}")
+
+    print(f"[Reentrenar] Samples usuario: {len(df_usuario)}")
+
+    # Combinar con dataset original si existe
+    if CSV_ORIGINAL.exists():
+        df_original = pd.read_csv(CSV_ORIGINAL)
+        # Dar más peso al usuario repitiendo sus samples x5
+        df_usuario_boost = pd.concat([df_usuario] * 5, ignore_index=True)
+        df = pd.concat([df_original, df_usuario_boost], ignore_index=True)
+    else:
+        df = df_usuario
+
+    print(f"[Reentrenar] Dataset total: {len(df)} filas")
+
+    CHROMA   = [f'chroma_{n}' for n in ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B']]
+    SPECTRAL = ['spectral_centroid','spectral_rolloff','spectral_bandwidth','zero_crossing_rate','rms_energy']
+    FREQ     = [f'freq_pico_{i}' for i in range(1, 6)]
+    MAG      = [f'magnitud_pico_{i}' for i in range(1, 6)]
+    PITCH    = ['pitch_medio','pitch_std','pitch_min','pitch_max']
+    COLS     = CHROMA + SPECTRAL + FREQ + MAG + PITCH
+
+    X  = df[COLS].fillna(0).values
+    le = LabelEncoder()
+    y  = le.fit_transform(df['acorde'].values)
+
+    scaler   = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        X_scaled, y, test_size=0.15, random_state=42, stratify=y)
+
+    mlp = MLPClassifier(
+        hidden_layer_sizes=(128, 64),
+        activation='relu', solver='adam',
+        max_iter=300, random_state=42,
+        early_stopping=True, validation_fraction=0.1,
+        n_iter_no_change=15, verbose=False,
+    )
+    mlp.fit(X_train, y_train)
+    acc = accuracy_score(y_test, mlp.predict(X_test))
+    print(f"[Reentrenar] Accuracy: {acc:.2%}")
+
+    # Guardar y recargar en memoria
+    joblib.dump(mlp,    BASE_DIR / 'modelo_mlp.pkl')
+    joblib.dump(scaler, BASE_DIR / 'scaler_mlp.pkl')
+    joblib.dump(le,     BASE_DIR / 'label_encoder.pkl')
+
+    _MLP_MODEL  = mlp
+    _MLP_SCALER = scaler
+    _NB_ENCODER = le
+
+    return {
+        "success":  True,
+        "accuracy": round(acc * 100, 2),
+        "total_samples": len(df),
+        "samples_usuario": len(df_usuario),
+        "mensaje": f"Modelo reentrenado con {acc:.1%} de precisión",
+    }
+
+
 if __name__ == "__main__":
     import uvicorn
     import os
