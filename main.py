@@ -23,20 +23,45 @@ from detector_acordes_dsp import (  # type: ignore
     ACORDES_AVANZADOS
 )
 
+import asyncio
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app):
+    """Entrena MLP en background para no bloquear el puerto."""
+    asyncio.create_task(_train_background())
+    yield
+
+async def _train_background():
+    import concurrent.futures
+    loop = asyncio.get_event_loop()
+    with concurrent.futures.ThreadPoolExecutor() as pool:
+        await loop.run_in_executor(pool, _train_and_load)
+
+def _train_and_load():
+    try:
+        from train_mlp import train as train_mlp  # type: ignore
+        mlp, scaler, le = train_mlp()
+        if mlp is not None:
+            print("[Startup] MLP entrenado correctamente.")
+            _load_nb_models()
+            return
+    except Exception as e:
+        print(f"[Startup] MLP falló ({e}), entrenando Bayes...")
+    try:
+        from train_bayes import train as train_bayes  # type: ignore
+        train_bayes()
+        _load_nb_models()
+        print("[Startup] Bayes listo como fallback.")
+    except Exception as e2:
+        print(f"[Startup] Error: {e2}")
+
 app = FastAPI(
     title="Sonaris API",
     description="API para detección de acordes de guitarra usando DSP",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan
 )
-
-@app.on_event("startup")
-async def startup_train():
-    """Carga modelos entrenados durante el build step."""
-    loaded = _load_nb_models()
-    if loaded:
-        print("[Startup] Modelos cargados correctamente.")
-    else:
-        print("[Startup] No se encontraron modelos pre-entrenados.")
 
 # Configurar CORS para permitir peticiones desde Flutter
 app.add_middleware(
@@ -293,18 +318,26 @@ def _load_nb_models():
     mlp_path    = os.path.join(base, 'modelo_mlp.pkl')
     scaler_path = os.path.join(base, 'scaler_mlp.pkl')
     if os.path.exists(mlp_path) and os.path.exists(scaler_path) and os.path.exists(encoder_path):
-        _MLP_MODEL  = joblib.load(mlp_path)
-        _MLP_SCALER = joblib.load(scaler_path)
-        _NB_ENCODER = joblib.load(encoder_path)
-        print("[Models] MLP cargado correctamente.")
+        try:
+            _MLP_MODEL  = joblib.load(mlp_path)
+            _MLP_SCALER = joblib.load(scaler_path)
+            _NB_ENCODER = joblib.load(encoder_path)
+            print("[Models] MLP cargado correctamente.")
+        except Exception as e:
+            print(f"[Models] MLP pkl incompatible, ignorando: {e}")
+            _MLP_MODEL = None
 
     # Cargar Bayes como fallback
     bayes_path = os.path.join(base, 'modelo_bayes.pkl')
     if os.path.exists(bayes_path) and os.path.exists(encoder_path):
-        _NB_MODEL   = joblib.load(bayes_path)
-        if _NB_ENCODER is None:
-            _NB_ENCODER = joblib.load(encoder_path)
-        print("[Models] Bayes cargado correctamente.")
+        try:
+            _NB_MODEL   = joblib.load(bayes_path)
+            if _NB_ENCODER is None:
+                _NB_ENCODER = joblib.load(encoder_path)
+            print("[Models] Bayes cargado correctamente.")
+        except Exception as e:
+            print(f"[Models] Bayes pkl incompatible, ignorando: {e}")
+            _NB_MODEL = None
 
     return _MLP_MODEL is not None or _NB_MODEL is not None
 
