@@ -6,6 +6,6 @@ scipy==1.11.4
 soundfile==0.12.1
 librosa==0.10.2
 setuptools>=68.0
-scikit-learn==1.4.2
+scikit-learn==1.5.2
 joblib==1.4.2
 pandas==2.2.2
