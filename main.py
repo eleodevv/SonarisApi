@@ -312,8 +312,13 @@ def _extract_features_for_bayes(file_path: str) -> dict:
     if mx > 0:
         y = y / mx
 
+    # Garantizar mínimo 1 segundo de audio (pad con ceros si es muy corto)
+    min_samples = sr  # 1 segundo
+    if len(y) < min_samples:
+        y = np.pad(y, (0, min_samples - len(y)))
+
     # ── Picos FFT ──────────────────────────────────────────────────────────
-    n_fft = 16384
+    n_fft = min(16384, len(y))
     windowed = y * np.hanning(len(y))
     fft_mag  = np.abs(np.fft.rfft(windowed, n=n_fft))
     freqs    = np.fft.rfftfreq(n_fft, 1.0 / sr)
@@ -329,10 +334,15 @@ def _extract_features_for_bayes(file_path: str) -> dict:
     pf = np.zeros(5); pm = np.zeros(5)
     pf[:len(peak_f)] = peak_f; pm[:len(peak_m)] = peak_m
 
+    # n_fft adaptativo para librosa (potencia de 2, máx 2048, no mayor que señal)
+    lib_n_fft = 512
+    while lib_n_fft * 2 <= min(2048, len(y)):
+        lib_n_fft *= 2
+
     # ── Spectral features via librosa ──────────────────────────────────────
-    centroid   = float(np.mean(librosa.feature.spectral_centroid(y=y, sr=sr)))
-    rolloff    = float(np.mean(librosa.feature.spectral_rolloff(y=y, sr=sr)))
-    bandwidth  = float(np.mean(librosa.feature.spectral_bandwidth(y=y, sr=sr)))
+    centroid   = float(np.mean(librosa.feature.spectral_centroid(y=y, sr=sr, n_fft=lib_n_fft)))
+    rolloff    = float(np.mean(librosa.feature.spectral_rolloff(y=y, sr=sr, n_fft=lib_n_fft)))
+    bandwidth  = float(np.mean(librosa.feature.spectral_bandwidth(y=y, sr=sr, n_fft=lib_n_fft)))
     zcr        = float(np.mean(librosa.feature.zero_crossing_rate(y)))
     rms        = float(np.mean(librosa.feature.rms(y=y)))
 
@@ -400,6 +410,8 @@ async def clasificar_acorde_bayes(audio: UploadFile = File(...)):
         # Top 5
         top5_idx = np.argsort(proba)[::-1][:5]
         top5 = [{"acorde": classes[i], "probabilidad": round(float(proba[i]) * 100, 1)} for i in top5_idx]
+
+        print(f"[Bayes] Predicho: {classes[top5_idx[0]]} ({proba[top5_idx[0]]:.2%}) | Top3: {[(classes[i], f'{proba[i]:.2%}') for i in top5_idx[:3]]}")
 
         return {
             "success": True,
