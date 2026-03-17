@@ -23,38 +23,21 @@ from detector_acordes_dsp import (  # type: ignore
     ACORDES_AVANZADOS
 )
 
-import asyncio
 from contextlib import asynccontextmanager
 
 @asynccontextmanager
 async def lifespan(app):
-    """Entrena MLP en background para no bloquear el puerto."""
-    asyncio.create_task(_train_background())
-    yield
-
-async def _train_background():
-    import concurrent.futures
-    loop = asyncio.get_event_loop()
-    with concurrent.futures.ThreadPoolExecutor() as pool:
-        await loop.run_in_executor(pool, _train_and_load)
-
-def _train_and_load():
-    try:
-        from train_mlp import train as train_mlp  # type: ignore
-        mlp, scaler, le = train_mlp()
-        if mlp is not None:
-            print("[Startup] MLP entrenado correctamente.")
+    """Carga modelos pre-entrenados en el build step."""
+    loaded = _load_nb_models()
+    if not loaded:
+        # fallback: entrenar si no hay pkl (primera vez sin build.sh)
+        try:
+            from train_mlp import train as train_mlp  # type: ignore
+            train_mlp()
             _load_nb_models()
-            return
-    except Exception as e:
-        print(f"[Startup] MLP falló ({e}), entrenando Bayes...")
-    try:
-        from train_bayes import train as train_bayes  # type: ignore
-        train_bayes()
-        _load_nb_models()
-        print("[Startup] Bayes listo como fallback.")
-    except Exception as e2:
-        print(f"[Startup] Error: {e2}")
+        except Exception as e:
+            print(f"[Startup] Error cargando modelos: {e}")
+    yield
 
 app = FastAPI(
     title="Sonaris API",
