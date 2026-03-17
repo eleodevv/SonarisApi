@@ -290,6 +290,14 @@ def _load_nb_models():
     _NB_FEATURES = chroma + spectral + freq + mag + pitch
 
     encoder_path = os.path.join(base, 'label_encoder.pkl')
+    mlp_path     = os.path.join(base, 'modelo_mlp.pkl')
+    scaler_path  = os.path.join(base, 'scaler_mlp.pkl')
+
+    print(f"[Models] Buscando pkl en: {base}")
+    print(f"[Models] modelo_mlp.pkl existe: {os.path.exists(mlp_path)}")
+    print(f"[Models] scaler_mlp.pkl existe: {os.path.exists(scaler_path)}")
+    print(f"[Models] label_encoder.pkl existe: {os.path.exists(encoder_path)}")
+    print(f"[Models] Archivos en directorio: {os.listdir(base)}")
 
     # Intentar cargar MLP primero (más preciso)
     mlp_path    = os.path.join(base, 'modelo_mlp.pkl')
