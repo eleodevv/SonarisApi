@@ -469,6 +469,54 @@ CSV_USUARIO     = BASE_DIR / 'dataset_usuario.csv'
 CSV_ORIGINAL    = BASE_DIR / 'dataset_real.csv'
 
 
+def _commit_csv_github(mensaje: str = "update: dataset_usuario.csv"):
+    """Sube dataset_usuario.csv a GitHub via API. Silencioso si no hay token."""
+    import base64, urllib.request, urllib.error, json as _json
+
+    token = os.environ.get('GITHUB_TOKEN')
+    repo  = os.environ.get('GITHUB_REPO', 'eleodevv/SonarisApi')
+    if not token or not CSV_USUARIO.exists():
+        return False
+
+    archivo = 'dataset_usuario.csv'
+    url     = f'https://api.github.com/repos/{repo}/contents/{archivo}'
+    headers = {
+        'Authorization': f'token {token}',
+        'Content-Type':  'application/json',
+        'User-Agent':    'SonarisAPI',
+    }
+
+    # Leer contenido actual codificado en base64
+    contenido_b64 = base64.b64encode(CSV_USUARIO.read_bytes()).decode()
+
+    # Obtener SHA del archivo actual (necesario para actualizar)
+    sha = None
+    try:
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req) as resp:
+            sha = _json.loads(resp.read())['sha']
+    except urllib.error.HTTPError as e:
+        if e.code != 404:
+            print(f"[GitHub] Error obteniendo SHA: {e}")
+            return False
+
+    # Crear o actualizar el archivo
+    body = {'message': mensaje, 'content': contenido_b64}
+    if sha:
+        body['sha'] = sha
+
+    try:
+        data = _json.dumps(body).encode()
+        req  = urllib.request.Request(url, data=data, headers=headers, method='PUT')
+        with urllib.request.urlopen(req):
+            pass
+        print(f"[GitHub] dataset_usuario.csv commiteado ✅")
+        return True
+    except Exception as e:
+        print(f"[GitHub] Error commiteando: {e}")
+        return False
+
+
 @app.get("/samples/descargar")
 async def descargar_samples():
     """Descarga el dataset_usuario.csv para guardarlo en el repo"""
@@ -518,6 +566,15 @@ async def subir_sample(audio: UploadFile = File(...), acorde: str = Form(...)):
         total  = len(df)
 
         print(f"[Samples] +1 {acorde} | Total: {total} | {conteo}")
+
+        # Commit automático a GitHub (async en background para no bloquear)
+        import threading
+        threading.Thread(
+            target=_commit_csv_github,
+            args=(f"samples: +1 {acorde} (total {total})",),
+            daemon=True
+        ).start()
+
         return {"success": True, "acorde": acorde, "total": total, "por_acorde": conteo}
 
     except Exception as e:
@@ -612,6 +669,9 @@ async def reentrenar():
     _MLP_MODEL  = mlp
     _MLP_SCALER = scaler
     _NB_ENCODER = le
+
+    # Commit del dataset a GitHub para persistirlo
+    _commit_csv_github(f"reentrenar: {acc:.1%} accuracy, {len(df_usuario)} samples usuario")
 
     return {
         "success":  True,
