@@ -273,28 +273,43 @@ async def verificar_acorde(
             detail=f"Error al verificar acorde: {str(e)}"
         )
 
-# ── Naive Bayes: cargar modelos al inicio ──────────────────────────────────
-_NB_MODEL = None
+# ── Modelos ML: Bayes + MLP ───────────────────────────────────────────────
+_NB_MODEL   = None
 _NB_ENCODER = None
 _NB_FEATURES = None
+_MLP_MODEL  = None
+_MLP_SCALER = None
 
 def _load_nb_models():
-    global _NB_MODEL, _NB_ENCODER, _NB_FEATURES
+    global _NB_MODEL, _NB_ENCODER, _NB_FEATURES, _MLP_MODEL, _MLP_SCALER
     base = os.path.dirname(os.path.abspath(__file__))
-    model_path   = os.path.join(base, 'modelo_bayes.pkl')
+    chroma   = [f'chroma_{n}' for n in ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B']]
+    spectral = ['spectral_centroid','spectral_rolloff','spectral_bandwidth','zero_crossing_rate','rms_energy']
+    freq     = [f'freq_pico_{i}' for i in range(1,6)]
+    mag      = [f'magnitud_pico_{i}' for i in range(1,6)]
+    pitch    = ['pitch_medio','pitch_std','pitch_min','pitch_max']
+    _NB_FEATURES = chroma + spectral + freq + mag + pitch
+
     encoder_path = os.path.join(base, 'label_encoder.pkl')
-    if os.path.exists(model_path) and os.path.exists(encoder_path):
-        _NB_MODEL   = joblib.load(model_path)
+
+    # Intentar cargar MLP primero (más preciso)
+    mlp_path    = os.path.join(base, 'modelo_mlp.pkl')
+    scaler_path = os.path.join(base, 'scaler_mlp.pkl')
+    if os.path.exists(mlp_path) and os.path.exists(scaler_path) and os.path.exists(encoder_path):
+        _MLP_MODEL  = joblib.load(mlp_path)
+        _MLP_SCALER = joblib.load(scaler_path)
         _NB_ENCODER = joblib.load(encoder_path)
-        # Features en el mismo orden que train_bayes.py
-        chroma  = [f'chroma_{n}' for n in ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B']]
-        spectral = ['spectral_centroid','spectral_rolloff','spectral_bandwidth','zero_crossing_rate','rms_energy']
-        freq    = [f'freq_pico_{i}' for i in range(1,6)]
-        mag     = [f'magnitud_pico_{i}' for i in range(1,6)]
-        pitch   = ['pitch_medio','pitch_std','pitch_min','pitch_max']
-        _NB_FEATURES = chroma + spectral + freq + mag + pitch
-        return True
-    return False
+        print("[Models] MLP cargado correctamente.")
+
+    # Cargar Bayes como fallback
+    bayes_path = os.path.join(base, 'modelo_bayes.pkl')
+    if os.path.exists(bayes_path) and os.path.exists(encoder_path):
+        _NB_MODEL   = joblib.load(bayes_path)
+        if _NB_ENCODER is None:
+            _NB_ENCODER = joblib.load(encoder_path)
+        print("[Models] Bayes cargado correctamente.")
+
+    return _MLP_MODEL is not None or _NB_MODEL is not None
 
 
 def _extract_features_for_bayes(file_path: str) -> dict:
@@ -382,10 +397,10 @@ async def clasificar_acorde_bayes(audio: UploadFile = File(...)):
     Clasifica el acorde usando Naive Bayes entrenado con el dataset DSP.
     Retorna el acorde predicho y las probabilidades de los top-5 acordes.
     """
-    if _NB_MODEL is None:
+    if _NB_MODEL is None and _MLP_MODEL is None:
         raise HTTPException(
             status_code=503,
-            detail="Modelo Bayes no disponible. Ejecuta train_bayes.py primero."
+            detail="Modelo no disponible."
         )
 
     allowed = ['audio/', 'application/octet-stream', 'video/']
@@ -404,7 +419,14 @@ async def clasificar_acorde_bayes(audio: UploadFile = File(...)):
         # Vector de features en el orden correcto
         x = np.array([[feats.get(f, 0.0) for f in _NB_FEATURES]])
 
-        proba = _NB_MODEL.predict_proba(x)[0]
+        # Usar MLP si está disponible, sino Bayes
+        if _MLP_MODEL is not None and _MLP_SCALER is not None:
+            x_scaled = _MLP_SCALER.transform(x)
+            proba    = _MLP_MODEL.predict_proba(x_scaled)[0]
+            metodo   = "mlp"
+        else:
+            proba  = _NB_MODEL.predict_proba(x)[0]
+            metodo = "naive_bayes"
         classes = _NB_ENCODER.classes_
 
         # Top 5
@@ -418,7 +440,7 @@ async def clasificar_acorde_bayes(audio: UploadFile = File(...)):
             "acorde_predicho": classes[top5_idx[0]],
             "confianza": round(float(proba[top5_idx[0]]) * 100, 1),
             "top5": top5,
-            "metodo": "naive_bayes"
+            "metodo": metodo
         }
 
     except Exception as e:
