@@ -27,16 +27,10 @@ from contextlib import asynccontextmanager
 
 @asynccontextmanager
 async def lifespan(app):
-    """Carga modelos pre-entrenados en el build step."""
+    """Carga modelos pre-entrenados generados en el build step."""
     loaded = _load_nb_models()
     if not loaded:
-        # fallback: entrenar si no hay pkl (primera vez sin build.sh)
-        try:
-            from train_mlp import train as train_mlp  # type: ignore
-            train_mlp()
-            _load_nb_models()
-        except Exception as e:
-            print(f"[Startup] Error cargando modelos: {e}")
+        print("[Startup] ADVERTENCIA: Ningún modelo disponible. Ejecuta build.sh primero.")
     yield
 
 app = FastAPI(
