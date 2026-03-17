@@ -1,3 +1,4 @@
+
 """
 Entrenamiento de Naive Bayes para clasificación de acordes de guitarra.
 Usa el dataset dataset_dsp.csv generado con características DSP reales.
@@ -15,7 +16,7 @@ import os
 
 # ── Rutas ──────────────────────────────────────────────────────────────────
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATASET_PATH = os.path.join(BASE_DIR, '..', 'dataset_dsp.csv')
+DATASET_PATH = os.path.join(BASE_DIR, 'dataset_dsp.csv')
 MODEL_BAYES_PATH = os.path.join(BASE_DIR, 'modelo_bayes.pkl')
 MODEL_REGRESION_PATH = os.path.join(BASE_DIR, 'modelo_regresion.pkl')
 ENCODER_PATH = os.path.join(BASE_DIR, 'label_encoder.pkl')
