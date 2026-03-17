@@ -469,6 +469,19 @@ CSV_USUARIO     = BASE_DIR / 'dataset_usuario.csv'
 CSV_ORIGINAL    = BASE_DIR / 'dataset_real.csv'
 
 
+@app.get("/samples/descargar")
+async def descargar_samples():
+    """Descarga el dataset_usuario.csv para guardarlo en el repo"""
+    from fastapi.responses import FileResponse
+    if not CSV_USUARIO.exists():
+        raise HTTPException(status_code=404, detail="No hay samples todavía.")
+    return FileResponse(
+        path=str(CSV_USUARIO),
+        media_type='text/csv',
+        filename='dataset_usuario.csv',
+    )
+
+
 @app.post("/samples")
 async def subir_sample(audio: UploadFile = File(...), acorde: str = ""):
     """Recibe un audio etiquetado, extrae features y lo guarda en dataset_usuario.csv"""
