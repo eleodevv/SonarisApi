@@ -23,8 +23,7 @@ FEATURE_COLS  = CHROMA_COLS + SPECTRAL_COLS + FREQ_COLS + MAG_COLS + PITCH_COLS
 
 
 def train():
-    csv_path     = BASE / 'dataset_real.csv'
-    csv_usuario  = BASE / 'dataset_usuario.csv'
+    csv_path = BASE / 'dataset_real.csv'
 
     if not csv_path.exists():
         print("[MLP] dataset_real.csv no encontrado, saltando entrenamiento MLP.")
@@ -32,17 +31,6 @@ def train():
 
     print(f"[MLP] Cargando {csv_path}...")
     df = pd.read_csv(csv_path)
-
-    # Incluir datos del usuario si existen (con peso x5)
-    if csv_usuario.exists():
-        df_usuario = pd.read_csv(csv_usuario)
-        n_usuario  = len(df_usuario)
-        df_usuario_boost = pd.concat([df_usuario] * 5, ignore_index=True)
-        df = pd.concat([df, df_usuario_boost], ignore_index=True)
-        print(f"[MLP] +{n_usuario} samples del usuario (x5 boost) → total {len(df)} filas")
-    else:
-        print(f"[MLP] Sin dataset_usuario.csv, entrenando solo con dataset original")
-
     print(f"[MLP] Filas: {len(df)} | Acordes: {df['acorde'].nunique()} — {sorted(df['acorde'].unique())}")
 
     X = df[FEATURE_COLS].fillna(0).values
