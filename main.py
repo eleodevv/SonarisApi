@@ -3,7 +3,7 @@ FastAPI Backend para Detección de Acordes
 Sistema DSP sin Machine Learning
 """
 
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, UploadFile, HTTPException, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import numpy as np
@@ -483,7 +483,7 @@ async def descargar_samples():
 
 
 @app.post("/samples")
-async def subir_sample(audio: UploadFile = File(...), acorde: str = ""):
+async def subir_sample(audio: UploadFile = File(...), acorde: str = Form(...)):
     """Recibe un audio etiquetado, extrae features y lo guarda en dataset_usuario.csv"""
     acorde = acorde.strip()
     if acorde not in ACORDES_VALIDOS:
