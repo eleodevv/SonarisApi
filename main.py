@@ -207,22 +207,22 @@ async def verificar_acorde(
     # Fallback: leer el acorde del filename si el form field no llegó
     if not acorde_esperado and audio.filename:
         name = audio.filename.replace('.wav','').replace('.mp3','').strip()
-        if name in CHORD_DEFINITIONS:
+        if name.upper() in CHORD_DEFINITIONS or name in CHORD_DEFINITIONS:
             acorde_esperado = name
 
     if not acorde_esperado:
-        raise HTTPException(
-            status_code=400,
-            detail="Debe proporcionar el acorde esperado"
-        )
-    
-    acorde_esperado = acorde_esperado.upper()
-    
-    if acorde_esperado not in CHORD_DEFINITIONS:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Acorde '{acorde_esperado}' no encontrado"
-        )
+        raise HTTPException(status_code=400, detail="Debe proporcionar el acorde esperado")
+
+    # Normalizar: strip + buscar case-insensitive
+    acorde_esperado = acorde_esperado.strip()
+    # Buscar match case-insensitive en las definiciones
+    match = next((k for k in CHORD_DEFINITIONS if k.upper() == acorde_esperado.upper()), None)
+    if not match:
+        # Intentar con el valor tal cual (para F#m, Am7, etc.)
+        match = next((k for k in CHORD_DEFINITIONS if k == acorde_esperado), None)
+    if not match:
+        raise HTTPException(status_code=404, detail=f"Acorde '{acorde_esperado}' no encontrado. Disponibles: {list(CHORD_DEFINITIONS.keys())}")
+    acorde_esperado = match
     
     try:
         # Guardar archivo temporal
