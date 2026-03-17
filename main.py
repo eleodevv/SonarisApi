@@ -31,14 +31,23 @@ app = FastAPI(
 
 @app.on_event("startup")
 async def startup_train():
-    """Siempre entrena el modelo al iniciar para evitar incompatibilidades de versión."""
-    print("[Startup] Entrenando modelo Bayes...")
+    """Entrena modelos al iniciar para evitar incompatibilidades de versión."""
+    # Intentar MLP primero (dataset real, 99%+ accuracy)
     try:
-        from train_bayes import train  # type: ignore
-        train()
-        print("[Startup] Modelo entrenado correctamente.")
+        from train_mlp import train as train_mlp  # type: ignore
+        mlp, scaler, le = train_mlp()
+        if mlp is not None:
+            print("[Startup] MLP entrenado correctamente.")
+        else:
+            raise Exception("dataset_real.csv no disponible")
     except Exception as e:
-        print(f"[Startup] Error entrenando modelo: {e}")
+        print(f"[Startup] MLP no disponible ({e}), entrenando Bayes...")
+        try:
+            from train_bayes import train as train_bayes  # type: ignore
+            train_bayes()
+            print("[Startup] Bayes entrenado como fallback.")
+        except Exception as e2:
+            print(f"[Startup] Error entrenando Bayes: {e2}")
     _load_nb_models()
 
 # Configurar CORS para permitir peticiones desde Flutter
