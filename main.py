@@ -31,19 +31,14 @@ app = FastAPI(
 
 @app.on_event("startup")
 async def startup_train():
-    """Entrena el modelo Bayes al iniciar si no existe el .pkl"""
-    base = os.path.dirname(os.path.abspath(__file__))
-    model_path = os.path.join(base, 'modelo_bayes.pkl')
-    if not os.path.exists(model_path):
-        print("[Startup] modelo_bayes.pkl no encontrado, entrenando...")
-        try:
-            from train_bayes import train  # type: ignore
-            train()
-            print("[Startup] Modelo entrenado correctamente.")
-        except Exception as e:
-            print(f"[Startup] Error entrenando modelo: {e}")
-    else:
-        print("[Startup] modelo_bayes.pkl encontrado, cargando...")
+    """Siempre entrena el modelo al iniciar para evitar incompatibilidades de versión."""
+    print("[Startup] Entrenando modelo Bayes...")
+    try:
+        from train_bayes import train  # type: ignore
+        train()
+        print("[Startup] Modelo entrenado correctamente.")
+    except Exception as e:
+        print(f"[Startup] Error entrenando modelo: {e}")
     _load_nb_models()
 
 # Configurar CORS para permitir peticiones desde Flutter
