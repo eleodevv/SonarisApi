@@ -1,469 +1,227 @@
 """
-FastAPI Backend para Detección de Acordes
-Sistema DSP sin Machine Learning
+Sonaris API - Detección de Acordes de Guitarra
+FastAPI + CNN (TensorFlow/Keras) + DSP (FFT)
 """
 
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from contextlib import asynccontextmanager
+from pathlib import Path
+import tempfile, os
 import numpy as np
 import librosa
 import soundfile as sf
-from pathlib import Path
-import tempfile
-import os
-import joblib
+from scipy.signal import find_peaks
 
-from detector_acordes_dsp import (  # type: ignore
-    detect_notes_fast,
-    check_chord,
-    CHORD_DEFINITIONS,
-    ACORDES_BASICOS,
-    ACORDES_MEDIOS,
-    ACORDES_AVANZADOS
-)
+from chords import CHORD_DEFINITIONS, ACORDES_BASICOS, ACORDES_MEDIOS, ACORDES_AVANZADOS
+from dsp import detect_notes_fast, check_chord
 
-from contextlib import asynccontextmanager
+# ── Modelo ────────────────────────────────────────────────────────────────────
+_CNN_MODEL = None
+_CLASSES   = None
+
+SR         = 22050
+DURATION   = 2.0
+N_MELS     = 128
+HOP_LENGTH = 512
+N_FFT      = 2048
+IMG_H      = 128
+IMG_W      = 87
+
+
+def _load_models():
+    global _CNN_MODEL, _CLASSES
+    base = Path(os.path.dirname(os.path.abspath(__file__)))
+    model_path   = base / "training" / "modelo_cnn.keras"
+    classes_path = base / "training" / "label_classes.npy"
+    try:
+        import tensorflow as tf
+        _CNN_MODEL = tf.keras.models.load_model(str(model_path))
+        _CLASSES   = np.load(str(classes_path), allow_pickle=True)
+        print(f"[Models] CNN cargado. Clases: {list(_CLASSES)}")
+        return True
+    except Exception as e:
+        print(f"[Models] Error cargando CNN: {e}")
+        return False
+
 
 @asynccontextmanager
 async def lifespan(app):
-    """Carga modelos pre-entrenados generados en el build step."""
-    loaded = _load_nb_models()
-    if not loaded:
-        print("[Startup] ADVERTENCIA: Ningún modelo disponible. Ejecuta build.sh primero.")
+    if not _load_models():
+        print("[Startup] Modelo no disponible. Ejecuta training/train_cnn.py primero.")
     yield
 
-app = FastAPI(
-    title="Sonaris API",
-    description="API para detección de acordes de guitarra usando DSP",
-    version="1.0.0",
-    lifespan=lifespan
-)
 
-# Configurar CORS para permitir peticiones desde Flutter
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app = FastAPI(title="Sonaris API", version="3.0.0", lifespan=lifespan)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True,
+                   allow_methods=["*"], allow_headers=["*"])
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _nivel(acorde: str) -> str:
+    if acorde in ACORDES_BASICOS: return "basico"
+    if acorde in ACORDES_MEDIOS:  return "medio"
+    return "avanzado"
+
+
+def _validate_audio(audio: UploadFile):
+    ct = audio.content_type or ''
+    if ct and not any(ct.startswith(p) for p in ['audio/', 'application/octet-stream', 'video/']):
+        raise HTTPException(status_code=400, detail=f"Tipo no soportado: {ct}")
+
+
+def _save_temp(content: bytes) -> str:
+    with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as tmp:
+        tmp.write(content)
+        return tmp.name
+
+
+def _wav_to_melspec(file_path: str) -> np.ndarray:
+    """Convierte WAV a mel-spectrogram normalizado listo para la CNN."""
+    import tensorflow as tf
+    y, sr = librosa.load(file_path, sr=SR, duration=DURATION, mono=True)
+    target = int(SR * DURATION)
+    if len(y) < target:
+        y = np.pad(y, (0, target - len(y)))
+    else:
+        y = y[:target]
+
+    mel    = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=N_MELS,
+                                             n_fft=N_FFT, hop_length=HOP_LENGTH)
+    mel_db = librosa.power_to_db(mel, ref=np.max)
+
+    if mel_db.shape[1] != IMG_W:
+        mel_db = tf.image.resize(mel_db[..., np.newaxis], [IMG_H, IMG_W]).numpy()[..., 0]
+
+    mel_db = (mel_db - mel_db.min()) / (mel_db.max() - mel_db.min() + 1e-8)
+    return mel_db.astype(np.float32)[np.newaxis, ..., np.newaxis]  # (1, H, W, 1)
+
+# ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @app.get("/")
 async def root():
-    """Endpoint raíz"""
-    return {
-        "message": "Sonaris API - Detección de Acordes",
-        "version": "1.0.0",
-        "status": "online"
-    }
+    return {"message": "Sonaris API", "version": "3.0.0", "status": "online"}
 
 @app.get("/health")
 async def health_check():
-    """Verificar estado del servidor"""
     return {"status": "healthy"}
 
 @app.get("/acordes")
 async def listar_acordes():
-    """Lista todos los acordes disponibles organizados por nivel"""
     return {
         "total": len(CHORD_DEFINITIONS),
         "acordes": {
-            "basicos": list(ACORDES_BASICOS.keys()),
-            "medios": list(ACORDES_MEDIOS.keys()),
-            "avanzados": list(ACORDES_AVANZADOS.keys())
+            "basicos":   list(ACORDES_BASICOS.keys()),
+            "medios":    list(ACORDES_MEDIOS.keys()),
+            "avanzados": list(ACORDES_AVANZADOS.keys()),
         },
-        "definiciones": CHORD_DEFINITIONS
+        "definiciones": CHORD_DEFINITIONS,
     }
 
 @app.get("/acorde/{nombre}")
 async def obtener_acorde(nombre: str):
-    """Obtiene información de un acorde específico"""
     nombre = nombre.upper()
-    
     if nombre not in CHORD_DEFINITIONS:
         raise HTTPException(status_code=404, detail=f"Acorde '{nombre}' no encontrado")
-    
-    # Determinar nivel
-    if nombre in ACORDES_BASICOS:
-        nivel = "basico"
-    elif nombre in ACORDES_MEDIOS:
-        nivel = "medio"
-    else:
-        nivel = "avanzado"
-    
-    return {
-        "acorde": nombre,
-        "notas": CHORD_DEFINITIONS[nombre],
-        "nivel": nivel,
-        "num_notas": len(CHORD_DEFINITIONS[nombre])
-    }
+    return {"acorde": nombre, "notas": CHORD_DEFINITIONS[nombre],
+            "nivel": _nivel(nombre), "num_notas": len(CHORD_DEFINITIONS[nombre])}
+
 
 @app.post("/detectar")
-async def detectar_acorde(
-    audio: UploadFile = File(...),
-    acorde_esperado: str = None
-):
-    # FastAPI a veces no parsea form fields junto con files en multipart
-    # El acorde puede venir en el filename como fallback
+async def detectar_acorde(audio: UploadFile = File(...), acorde_esperado: str = None):
+    """Detecta el acorde usando DSP (FFT)."""
+    _validate_audio(audio)
     if not acorde_esperado and audio.filename:
-        # Flutter puede enviar el acorde en el filename: "A.wav", "Am.wav"
-        name = audio.filename.replace('.wav','').replace('.mp3','').strip()
+        name = audio.filename.replace('.wav', '').replace('.mp3', '').strip()
         if name in CHORD_DEFINITIONS:
             acorde_esperado = name
-    """
-    Detecta el acorde de un archivo de audio
-    
-    Parameters:
-    - audio: Archivo de audio (WAV, MP3, etc.)
-    - acorde_esperado: (Opcional) Acorde que se espera detectar
-    """
-    
-    # Validar tipo de archivo (Flutter puede enviar octet-stream)
-    allowed = ['audio/', 'application/octet-stream', 'video/']
-    ct = audio.content_type or ''
-    if ct and not any(ct.startswith(a) for a in allowed):
-        raise HTTPException(
-            status_code=400,
-            detail=f"Tipo de archivo no soportado: {ct}"
-        )
-    
     try:
-        # Guardar archivo temporal
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as temp_file:
-            content = await audio.read()
-            temp_file.write(content)
-            temp_path = temp_file.name
-        
-        # Detectar notas usando DSP rápido
-        detected_notes = detect_notes_fast(temp_path)
-        print(f"[DSP] Acorde esperado: {acorde_esperado} | Detectadas: {detected_notes}")
-        
-        # Si no se detectaron notas
-        if not detected_notes:
-            return JSONResponse(
-                status_code=200,
-                content={
-                    "success": False,
-                    "message": "No se detectaron notas claras",
-                    "notas_detectadas": [],
-                    "acorde_detectado": None,
-                    "confianza": 0.0
-                }
-            )
-        
-        # Encontrar el mejor acorde
-        mejor_acorde = None
-        mejor_confianza = 0.0
-        
+        tmp   = _save_temp(await audio.read())
+        notes = detect_notes_fast(tmp)
+        Path(tmp).unlink()
+
+        if not notes:
+            return JSONResponse(content={"success": False, "message": "No se detectaron notas",
+                                         "notas_detectadas": [], "acorde_detectado": None, "confianza": 0.0})
+
+        mejor, conf = None, 0.0
         for nombre_acorde, notas_acorde in CHORD_DEFINITIONS.items():
-            matched = sum(1 for nota in notas_acorde if nota in detected_notes)
-            confianza = matched / len(notas_acorde)
-            
-            # Penalizar notas extra
-            extra = sum(1 for nota in detected_notes if nota not in notas_acorde)
-            confianza = max(0, confianza - extra * 0.1)
-            
-            # Bonus si coincide con el esperado
+            matched = sum(1 for n in notas_acorde if n in notes)
+            extra   = sum(1 for n in notes if n not in notas_acorde)
+            c = max(0, matched / len(notas_acorde) - extra * 0.1)
             if acorde_esperado and nombre_acorde.upper() == acorde_esperado.upper():
-                confianza *= 1.2
-            
-            if confianza > mejor_confianza:
-                mejor_confianza = confianza
-                mejor_acorde = nombre_acorde
-        
-        # Verificar si es correcto (si hay acorde esperado)
+                c *= 1.2
+            if c > conf:
+                conf, mejor = c, nombre_acorde
+
         es_correcto = None
         if acorde_esperado:
             acorde_esperado = acorde_esperado.upper()
             if acorde_esperado in CHORD_DEFINITIONS:
-                result = check_chord(detected_notes, acorde_esperado, threshold=0.5)
-                es_correcto = result['match']
-        
-        # Determinar nivel del acorde detectado
-        if mejor_acorde in ACORDES_BASICOS:
-            nivel = "basico"
-        elif mejor_acorde in ACORDES_MEDIOS:
-            nivel = "medio"
-        else:
-            nivel = "avanzado"
-        
-        # Limpiar archivo temporal
-        Path(temp_path).unlink()
-        
-        return {
-            "success": True,
-            "acorde_detectado": mejor_acorde,
-            "confianza": round(mejor_confianza * 100, 1),
-            "notas_detectadas": detected_notes[:5],
-            "notas_esperadas": CHORD_DEFINITIONS[mejor_acorde],
-            "nivel": nivel,
-            "es_correcto": es_correcto,
-            "acorde_esperado": acorde_esperado if acorde_esperado else None
-        }
-        
+                es_correcto = check_chord(notes, acorde_esperado, threshold=0.5)['match']
+
+        return {"success": True, "acorde_detectado": mejor, "confianza": round(conf * 100, 1),
+                "notas_detectadas": notes[:5], "notas_esperadas": CHORD_DEFINITIONS[mejor],
+                "nivel": _nivel(mejor), "es_correcto": es_correcto, "acorde_esperado": acorde_esperado}
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error al procesar audio: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.post("/verificar")
-async def verificar_acorde(
-    audio: UploadFile = File(...),
-    acorde_esperado: str = None
-):
-    """
-    Verifica si el audio corresponde al acorde esperado
-    Similar a /detectar pero enfocado en validación
-    """
-    # Fallback: leer el acorde del filename si el form field no llegó
+async def verificar_acorde(audio: UploadFile = File(...), acorde_esperado: str = None):
+    """Verifica si el audio corresponde al acorde esperado usando DSP."""
+    _validate_audio(audio)
     if not acorde_esperado and audio.filename:
-        name = audio.filename.replace('.wav','').replace('.mp3','').strip()
-        if name.upper() in CHORD_DEFINITIONS or name in CHORD_DEFINITIONS:
+        name = audio.filename.replace('.wav', '').replace('.mp3', '').strip()
+        if name.upper() in CHORD_DEFINITIONS:
             acorde_esperado = name
-
     if not acorde_esperado:
         raise HTTPException(status_code=400, detail="Debe proporcionar el acorde esperado")
 
-    # Normalizar: strip + buscar case-insensitive
-    acorde_esperado = acorde_esperado.strip()
-    # Buscar match case-insensitive en las definiciones
-    match = next((k for k in CHORD_DEFINITIONS if k.upper() == acorde_esperado.upper()), None)
+    match = next((k for k in CHORD_DEFINITIONS if k.upper() == acorde_esperado.strip().upper()), None)
     if not match:
-        # Intentar con el valor tal cual (para F#m, Am7, etc.)
-        match = next((k for k in CHORD_DEFINITIONS if k == acorde_esperado), None)
-    if not match:
-        raise HTTPException(status_code=404, detail=f"Acorde '{acorde_esperado}' no encontrado. Disponibles: {list(CHORD_DEFINITIONS.keys())}")
-    acorde_esperado = match
-    
+        raise HTTPException(status_code=404, detail=f"Acorde '{acorde_esperado}' no encontrado")
+
     try:
-        # Guardar archivo temporal
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as temp_file:
-            content = await audio.read()
-            temp_file.write(content)
-            temp_path = temp_file.name
-        
-        # Detectar notas
-        detected_notes = detect_notes_fast(temp_path)
-        print(f"[DSP] Verificar: {acorde_esperado} | Detectadas: {detected_notes}")
-        
-        # Verificar acorde
-        result = check_chord(detected_notes, acorde_esperado, threshold=0.6)
-        
-        # Limpiar
-        Path(temp_path).unlink()
-        
-        return {
-            "success": True,
-            "acorde_esperado": acorde_esperado,
-            "es_correcto": result['match'],
-            "confianza": round(result['confidence'], 1),
-            "notas_esperadas": result['expected_notes'],
-            "notas_detectadas": result['detected_notes'],
-            "notas_correctas": result['matched_notes'],
-            "notas_faltantes": result['missing_notes'],
-            "notas_extra": result['extra_notes']
-        }
-        
+        tmp   = _save_temp(await audio.read())
+        notes = detect_notes_fast(tmp)
+        Path(tmp).unlink()
+        result = check_chord(notes, match, threshold=0.6)
+        return {"success": True, "acorde_esperado": match, "es_correcto": result['match'],
+                "confianza": round(result['confidence'], 1), "notas_esperadas": result['expected_notes'],
+                "notas_detectadas": result['detected_notes'], "notas_correctas": result['matched_notes'],
+                "notas_faltantes": result['missing_notes'], "notas_extra": result['extra_notes']}
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error al verificar acorde: {str(e)}"
-        )
-
-# ── Modelos ML: Bayes + MLP ───────────────────────────────────────────────
-_NB_MODEL   = None
-_NB_ENCODER = None
-_NB_FEATURES = None
-_MLP_MODEL  = None
-_MLP_SCALER = None
-
-def _load_nb_models():
-    global _NB_MODEL, _NB_ENCODER, _NB_FEATURES, _MLP_MODEL, _MLP_SCALER
-    base = os.path.dirname(os.path.abspath(__file__))
-    chroma   = [f'chroma_{n}' for n in ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B']]
-    spectral = ['spectral_centroid','spectral_rolloff','spectral_bandwidth','zero_crossing_rate','rms_energy']
-    freq     = [f'freq_pico_{i}' for i in range(1,6)]
-    mag      = [f'magnitud_pico_{i}' for i in range(1,6)]
-    pitch    = ['pitch_medio','pitch_std','pitch_min','pitch_max']
-    _NB_FEATURES = chroma + spectral + freq + mag + pitch
-
-    encoder_path = os.path.join(base, 'label_encoder.pkl')
-    mlp_path     = os.path.join(base, 'modelo_mlp.pkl')
-    scaler_path  = os.path.join(base, 'scaler_mlp.pkl')
-
-    print(f"[Models] Buscando pkl en: {base}")
-    print(f"[Models] modelo_mlp.pkl existe: {os.path.exists(mlp_path)}")
-    print(f"[Models] scaler_mlp.pkl existe: {os.path.exists(scaler_path)}")
-    print(f"[Models] label_encoder.pkl existe: {os.path.exists(encoder_path)}")
-    print(f"[Models] Archivos en directorio: {os.listdir(base)}")
-
-    # Intentar cargar MLP primero (más preciso)
-    mlp_path    = os.path.join(base, 'modelo_mlp.pkl')
-    scaler_path = os.path.join(base, 'scaler_mlp.pkl')
-    if os.path.exists(mlp_path) and os.path.exists(scaler_path) and os.path.exists(encoder_path):
-        try:
-            _MLP_MODEL  = joblib.load(mlp_path)
-            _MLP_SCALER = joblib.load(scaler_path)
-            _NB_ENCODER = joblib.load(encoder_path)
-            print("[Models] MLP cargado correctamente.")
-        except Exception as e:
-            print(f"[Models] MLP pkl incompatible, ignorando: {e}")
-            _MLP_MODEL = None
-
-    # Cargar Bayes como fallback
-    bayes_path = os.path.join(base, 'modelo_bayes.pkl')
-    if os.path.exists(bayes_path) and os.path.exists(encoder_path):
-        try:
-            _NB_MODEL   = joblib.load(bayes_path)
-            if _NB_ENCODER is None:
-                _NB_ENCODER = joblib.load(encoder_path)
-            print("[Models] Bayes cargado correctamente.")
-        except Exception as e:
-            print(f"[Models] Bayes pkl incompatible, ignorando: {e}")
-            _NB_MODEL = None
-
-    return _MLP_MODEL is not None or _NB_MODEL is not None
-
-
-def _extract_features_for_bayes(file_path: str) -> dict:
-    """Extrae las mismas features que el dataset para pasarlas al modelo Bayes."""
-    import soundfile as sf
-    from scipy.signal import find_peaks
-
-    y, sr = sf.read(file_path, always_2d=False)
-    if y.ndim > 1:
-        y = y.mean(axis=1)
-    y = y.astype(np.float32)
-
-    # Normalizar
-    mx = np.max(np.abs(y))
-    if mx > 0:
-        y = y / mx
-
-    # Garantizar mínimo 1 segundo de audio (pad con ceros si es muy corto)
-    min_samples = sr  # 1 segundo
-    if len(y) < min_samples:
-        y = np.pad(y, (0, min_samples - len(y)))
-
-    # ── Picos FFT ──────────────────────────────────────────────────────────
-    n_fft = min(16384, len(y))
-    windowed = y * np.hanning(len(y))
-    fft_mag  = np.abs(np.fft.rfft(windowed, n=n_fft))
-    freqs    = np.fft.rfftfreq(n_fft, 1.0 / sr)
-    mask     = (freqs >= 70) & (freqs <= 1300)
-    fft_sub  = fft_mag[mask]
-    freq_sub = freqs[mask]
-    threshold = np.max(fft_sub) * 0.07 if len(fft_sub) > 0 else 0
-    peaks, _ = find_peaks(fft_sub, height=threshold, distance=6)
-    top5 = np.argsort(fft_sub[peaks])[::-1][:5] if len(peaks) >= 5 else np.argsort(fft_sub[peaks])[::-1]
-    peak_f = freq_sub[peaks[top5]] if len(peaks) > 0 else np.zeros(5)
-    peak_m = fft_sub[peaks[top5]] if len(peaks) > 0 else np.zeros(5)
-    # Pad to 5
-    pf = np.zeros(5); pm = np.zeros(5)
-    pf[:len(peak_f)] = peak_f; pm[:len(peak_m)] = peak_m
-
-    # n_fft adaptativo para librosa (potencia de 2, máx 2048, no mayor que señal)
-    lib_n_fft = 512
-    while lib_n_fft * 2 <= min(2048, len(y)):
-        lib_n_fft *= 2
-
-    # ── Spectral features via librosa ──────────────────────────────────────
-    centroid   = float(np.mean(librosa.feature.spectral_centroid(y=y, sr=sr, n_fft=lib_n_fft)))
-    rolloff    = float(np.mean(librosa.feature.spectral_rolloff(y=y, sr=sr, n_fft=lib_n_fft)))
-    bandwidth  = float(np.mean(librosa.feature.spectral_bandwidth(y=y, sr=sr, n_fft=lib_n_fft)))
-    zcr        = float(np.mean(librosa.feature.zero_crossing_rate(y)))
-    rms        = float(np.mean(librosa.feature.rms(y=y)))
-
-    # ── Chroma ────────────────────────────────────────────────────────────
-    chroma = librosa.feature.chroma_cqt(y=y, sr=sr)
-    chroma_mean = np.mean(chroma, axis=1)  # shape (12,)
-    note_names = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B']
-
-    # ── Pitch ─────────────────────────────────────────────────────────────
-    pitches, magnitudes = librosa.piptrack(y=y, sr=sr)
-    pitch_vals = pitches[magnitudes > np.max(magnitudes) * 0.1]
-    pitch_vals = pitch_vals[pitch_vals > 0]
-    if len(pitch_vals) == 0:
-        pitch_vals = np.array([0.0])
-
-    feat = {}
-    for i, n in enumerate(note_names):
-        feat[f'chroma_{n}'] = float(chroma_mean[i])
-    feat['spectral_centroid']  = centroid
-    feat['spectral_rolloff']   = rolloff
-    feat['spectral_bandwidth'] = bandwidth
-    feat['zero_crossing_rate'] = zcr
-    feat['rms_energy']         = rms
-    for i in range(5):
-        feat[f'freq_pico_{i+1}']     = float(pf[i])
-        feat[f'magnitud_pico_{i+1}'] = float(pm[i])
-    feat['pitch_medio'] = float(np.mean(pitch_vals))
-    feat['pitch_std']   = float(np.std(pitch_vals))
-    feat['pitch_min']   = float(np.min(pitch_vals))
-    feat['pitch_max']   = float(np.max(pitch_vals))
-    return feat
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/clasificar")
-async def clasificar_acorde_bayes(audio: UploadFile = File(...)):
-    """
-    Clasifica el acorde usando Naive Bayes entrenado con el dataset DSP.
-    Retorna el acorde predicho y las probabilidades de los top-5 acordes.
-    """
-    if _NB_MODEL is None and _MLP_MODEL is None:
-        raise HTTPException(
-            status_code=503,
-            detail="Modelo no disponible."
-        )
-
-    allowed = ['audio/', 'application/octet-stream', 'video/']
-    ct = audio.content_type or ''
-    if ct and not any(ct.startswith(a) for a in allowed):
-        raise HTTPException(status_code=400, detail=f"Tipo no soportado: {ct}")
-
+async def clasificar_acorde(audio: UploadFile = File(...)):
+    """Clasifica el acorde usando la CNN con mel-spectrogramas."""
+    if _CNN_MODEL is None:
+        raise HTTPException(status_code=503, detail="Modelo no disponible. Ejecuta training/train_cnn.py primero.")
+    _validate_audio(audio)
     try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as tmp:
-            tmp.write(await audio.read())
-            tmp_path = tmp.name
+        tmp  = _save_temp(await audio.read())
+        spec = _wav_to_melspec(tmp)
+        Path(tmp).unlink()
 
-        feats = _extract_features_for_bayes(tmp_path)
-        Path(tmp_path).unlink()
-
-        # Vector de features en el orden correcto
-        x = np.array([[feats.get(f, 0.0) for f in _NB_FEATURES]])
-
-        # Usar MLP si está disponible, sino Bayes
-        if _MLP_MODEL is not None and _MLP_SCALER is not None:
-            x_scaled = _MLP_SCALER.transform(x)
-            proba    = _MLP_MODEL.predict_proba(x_scaled)[0]
-            metodo   = "mlp"
-        else:
-            proba  = _NB_MODEL.predict_proba(x)[0]
-            metodo = "naive_bayes"
-        classes = _NB_ENCODER.classes_
-
-        # Top 5
+        proba    = _CNN_MODEL.predict(spec, verbose=0)[0]
         top5_idx = np.argsort(proba)[::-1][:5]
-        top5 = [{"acorde": classes[i], "probabilidad": round(float(proba[i]) * 100, 1)} for i in top5_idx]
-
-        print(f"[Bayes] Predicho: {classes[top5_idx[0]]} ({proba[top5_idx[0]]:.2%}) | Top3: {[(classes[i], f'{proba[i]:.2%}') for i in top5_idx[:3]]}")
 
         return {
-            "success": True,
-            "acorde_predicho": classes[top5_idx[0]],
-            "confianza": round(float(proba[top5_idx[0]]) * 100, 1),
-            "top5": top5,
-            "metodo": metodo
+            "success":         True,
+            "acorde_predicho": str(_CLASSES[top5_idx[0]]),
+            "confianza":       round(float(proba[top5_idx[0]]) * 100, 1),
+            "top5":            [{"acorde": str(_CLASSES[i]), "probabilidad": round(float(proba[i]) * 100, 1)}
+                                 for i in top5_idx],
+            "metodo":          "cnn",
         }
-
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error al clasificar: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 if __name__ == "__main__":
     import uvicorn
-    import os
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
