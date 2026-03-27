@@ -104,6 +104,7 @@ async def root():
     return {"message": "Sonaris API", "version": "3.0.0", "status": "online"}
 
 @app.get("/health")
+@app.head("/health")
 async def health_check():
     return {"status": "healthy"}
 
