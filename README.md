@@ -1,15 +1,15 @@
-# 🎸 Sonaris API
+# Sonaris API
 
 API REST para detección de acordes de guitarra usando procesamiento digital de señales (DSP).
 
-## 🚀 Instalación
+## Instalación
 
 ```bash
 cd api
 pip install -r requirements.txt
 ```
 
-## ▶️ Ejecutar
+## Ejecutar
 
 ```bash
 python main.py
@@ -106,7 +106,7 @@ Verifica si el audio corresponde al acorde esperado
 }
 ```
 
-## 🧪 Probar con cURL
+## Probar con cURL
 
 ```bash
 # Listar acordes
@@ -125,7 +125,7 @@ curl -X POST http://localhost:8000/verificar \
   -F "acorde_esperado=A"
 ```
 
-## 📱 Integración con Flutter
+## Integración con Flutter
 
 ```dart
 import 'package:http/http.dart' as http;
@@ -146,7 +146,7 @@ Future<Map<String, dynamic>> detectarAcorde(String audioPath) async {
 }
 ```
 
-## 🐳 Docker (Opcional)
+## Docker (Opcional)
 
 ```dockerfile
 FROM python:3.11-slim
@@ -166,7 +166,7 @@ docker build -t sonaris-api .
 docker run -p 8000:8000 sonaris-api
 ```
 
-## 📚 Documentación Interactiva
+## Documentación Interactiva
 
 Una vez ejecutando, visita:
 - Swagger UI: http://localhost:8000/docs
